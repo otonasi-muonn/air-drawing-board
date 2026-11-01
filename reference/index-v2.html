@@ -1,0 +1,608 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>空中お絵描き掲示板</title>
+<style>
+  :root { --ink:#222; --accent:#e84393; }
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  body { margin:0; font-family:"Hiragino Kaku Gothic ProN","Noto Sans CJK JP",sans-serif; color:var(--ink); background:#fdfdf8; }
+  header { display:flex; align-items:center; gap:8px; padding:8px 12px; background:#222; color:#fff; }
+  header .title { font-weight:700; font-size:18px; margin-right:auto; }
+  header button { background:#444; color:#fff; border:0; border-radius:8px; padding:8px 14px; font-size:15px; cursor:pointer; }
+  header button.active { background:var(--accent); }
+  main { padding:10px; max-width:1100px; margin:0 auto; }
+  .view { display:none; } .view.show { display:block; }
+  #stage { position:relative; width:100%; max-width:960px; margin:0 auto; }
+  #drawCanvas { width:100%; aspect-ratio:4/3; background:#fff; border:2px solid #333; border-radius:10px; touch-action:none; display:block; }
+  #activeCanvas { position:absolute; inset:0; width:100%; height:100%; touch-action:none; }
+  #attract { position:absolute; inset:0; display:none; align-items:center; justify-content:center; background:rgba(255,255,255,.82); border-radius:10px; z-index:5; }
+  #attract.show { display:flex; }
+  #attract div { font-size:34px; font-weight:800; text-align:center; line-height:1.5; animation:pulse 1.6s ease-in-out infinite; }
+  #attract span { font-size:19px; font-weight:600; color:#444; }
+  @keyframes pulse { 0%,100% { transform:scale(1); } 50% { transform:scale(1.045); } }
+  .steps { display:flex; gap:6px; justify-content:center; margin:2px 0 8px; flex-wrap:wrap; }
+  .steps span { background:#eee; border-radius:999px; padding:5px 14px; font-size:14px; font-weight:700; color:#555; }
+  .steps span.now { background:var(--accent); color:#fff; }
+  #camPreview { position:absolute; right:8px; bottom:8px; width:24%; aspect-ratio:16/9; object-fit:cover; transform:scaleX(-1); border:2px solid #333; border-radius:8px; background:#000; display:none; }
+  #penDot { position:absolute; width:18px; height:18px; border:3px solid var(--accent); border-radius:50%; pointer-events:none; display:none; transform:translate(-50%,-50%); }
+  .toolbar { display:flex; flex-wrap:wrap; gap:8px; align-items:center; margin:10px auto; max-width:960px; }
+  .swatch { width:44px; height:44px; border-radius:50%; border:3px solid #ccc; cursor:pointer; padding:0; }
+  .swatch.sel { border-color:#222; transform:scale(1.12); }
+  .wbtn, .abtn { border:2px solid #333; background:#fff; border-radius:8px; padding:8px 14px; font-size:16px; cursor:pointer; min-height:48px; }
+  .wbtn.sel { background:#333; color:#fff; }
+  .abtn.primary { background:var(--accent); border-color:var(--accent); color:#fff; font-weight:700; }
+  .abtn:disabled { opacity:.4; }
+  #meter { font-size:13px; color:#555; }
+  #meter b { font-size:15px; }
+  #meter .ok { color:#1a9e4b; } #meter .warn { color:#e67e22; } #meter .over { color:#d63031; }
+  #camStatus { font-size:13px; color:#555; }
+  .hint { text-align:center; color:#666; font-size:14px; margin:6px 0 0; }
+  /* board */
+  #boardGrid { display:grid; grid-template-columns:repeat(auto-fill,minmax(180px,1fr)); gap:10px; }
+  .card { background:#fff; border:1px solid #ccc; border-radius:8px; padding:6px; }
+  .card img { width:100%; aspect-ratio:4/3; object-fit:contain; background:#fff; display:block; }
+  .card .del { display:none; width:100%; margin-top:6px; background:#d63031; color:#fff; border:0; border-radius:6px; padding:6px; cursor:pointer; }
+  body.admin .card .del { display:block; }
+  /* done / restore */
+  .center { text-align:center; }
+  #qrCanvas { background:#fff; padding:10px; width:min(78vw,380px); height:auto; }
+  #restoreImg { max-width:100%; height:auto; border:1px solid #ccc; background:#fff; }
+  .big { font-size:20px; font-weight:700; }
+  .err { color:#d63031; font-weight:700; }
+  #fullImg { max-width:100%; }
+</style>
+</head>
+<body>
+<header>
+  <span class="title">🎨 空中お絵描き掲示板</span>
+  <button id="tabDraw" class="active">かく</button>
+  <button id="tabBoard">掲示板</button>
+  <button id="fsBtn">全画面</button>
+</header>
+<main>
+  <!-- ===== 描画ビュー ===== -->
+  <section id="viewDraw" class="view show">
+    <div id="stage">
+      <canvas id="drawCanvas" width="960" height="720"></canvas>
+      <canvas id="activeCanvas" width="960" height="720"></canvas>
+      <div id="attract"><div>✋ 空中で描こう！<br><span>カメラの前で「つまむ」と線が引けるよ<br>画面タッチでも描けます</span></div></div>
+      <video id="camPreview" playsinline muted></video>
+      <div id="penDot"></div>
+    </div>
+    <div class="steps"><span class="now">① 描く</span><span>② 「完成！」を押す</span><span>③ QRでスマホに保存</span></div>
+    <p class="hint">指やマウスで描いてね。カメラがある場合は「カメラで描く」で、つまむ（ピンチ）と線が引けるよ。</p>
+    <div class="toolbar" id="palette"></div>
+    <div class="toolbar">
+      <span>太さ:</span>
+      <button class="wbtn" data-w="0">細</button>
+      <button class="wbtn sel" data-w="1">中</button>
+      <button class="wbtn" data-w="2">太</button>
+      <button class="abtn" id="undoBtn">↩ もどす</button>
+      <button class="abtn" id="clearBtn">ぜんぶ消す</button>
+      <button class="abtn" id="camBtn">📷 カメラで描く</button>
+      <span id="camStatus"></span>
+      <span id="camDebug" style="font-size:12px;color:#888"></span>
+    </div>
+    <div class="toolbar">
+      <button class="abtn primary" id="postBtn">✅ 完成！掲示板に投稿する</button>
+      <span id="meter"></span>
+    </div>
+  </section>
+
+  <!-- ===== 掲示板ビュー ===== -->
+  <section id="viewBoard" class="view">
+    <div class="toolbar">
+      <span id="boardCount"></span>
+      <button class="abtn" id="adminBtn">運営モード</button>
+      <button class="abtn" id="exportBtn">バックアップ書き出し</button>
+      <button class="abtn" id="backDrawBtn">← 描きに行く</button>
+    </div>
+    <div id="boardGrid"></div>
+    <p class="hint" id="boardEmpty">まだ作品がありません。</p>
+  </section>
+
+  <!-- ===== 投稿完了ビュー ===== -->
+  <section id="viewDone" class="view center">
+    <p class="big">投稿しました！（運営の確認後に掲示板へ表示されます）</p>
+    <p>スマホで読み取ると、作品を画像で保存できます。</p>
+    <canvas id="qrCanvas" width="320" height="320"></canvas>
+    <p id="qrMsg"></p>
+    <div class="toolbar" style="justify-content:center">
+      <button class="abtn" id="fullBtn">作品を全画面で見る（写真で持ち帰る）</button>
+      <button class="abtn primary" id="nextBtn">次の人へ（リセット）</button>
+    </div>
+    <img id="fullImg" style="display:none" alt="作品">
+  </section>
+
+  <!-- ===== スマホ復元ビュー ===== -->
+  <section id="viewRestore" class="view center">
+    <p class="big">あなたの作品</p>
+    <img id="restoreImg" alt="復元した作品">
+    <p>画像を長押しすると保存できます。</p>
+    <p><a id="dlLink" class="abtn primary" style="text-decoration:none" download="air-drawing.png">PNGで保存する</a></p>
+    <p id="restoreErr" class="err"></p>
+  </section>
+</main>
+
+<script src="https://cdn.jsdelivr.net/npm/qrcode@1.5.4/build/qrcode.js"></script>
+<script>
+"use strict";
+// ================= CODEC-BEGIN =================
+// 描画データ形式 v1: 論理キャンバス 960x720 / 色・線幅はインデックス
+const DW = 960, DH = 720;
+const PALETTE = ["#000000","#D55E00","#E69F00","#009E73","#56B4E9","#0072B2","#CC79A7","#EAB505"]; // Okabe-Ito系（色覚配慮）。黄は白背景での視認性のため少し濃く調整
+const WIDTHS  = [4, 9, 16];
+
+function thinPoints(pts, minDist) {
+  if (pts.length < 2) return pts.slice();
+  const out = [pts[0]];
+  for (let i = 1; i < pts.length; i++) {
+    const dx = pts[i][0] - out[out.length-1][0], dy = pts[i][1] - out[out.length-1][1];
+    if (dx*dx + dy*dy >= minDist*minDist) out.push(pts[i]);
+  }
+  if (out[out.length-1] !== pts[pts.length-1]) out.push(pts[pts.length-1]);
+  return out;
+}
+function varintBytes(n, out) {
+  do { let b = n % 128; n = Math.floor(n / 128); if (n > 0) b += 128; out.push(b); } while (n > 0);
+}
+function zig(n){ return n >= 0 ? n*2 : -n*2 - 1; }
+function unzig(n){ return n % 2 === 0 ? n/2 : -(n+1)/2; }
+
+function encodeRaw(strokes, thinDist, quant) {
+  const out = [1]; // version
+  varintBytes(quant, out);
+  varintBytes(strokes.length, out);
+  for (const s of strokes) {
+    const pts = thinPoints(s.pts, thinDist).map(p => [Math.round(p[0]/quant), Math.round(p[1]/quant)]);
+    varintBytes(s.c, out); varintBytes(s.w, out); varintBytes(pts.length, out);
+    let px = 0, py = 0;
+    for (const [x, y] of pts) { varintBytes(zig(x-px), out); varintBytes(zig(y-py), out); px = x; py = y; }
+  }
+  return new Uint8Array(out);
+}
+async function streamToBytes(readable) {
+  const reader = readable.getReader(); const chunks = []; let total = 0;
+  for (;;) { const { done, value } = await reader.read(); if (done) break; chunks.push(value); total += value.length; }
+  const out = new Uint8Array(total); let off = 0;
+  for (const c of chunks) { out.set(c, off); off += c.length; }
+  return out;
+}
+async function deflate(bytes, streamType) {
+  const cs = new CompressionStream(streamType);
+  return streamToBytes(new Blob([bytes]).stream().pipeThrough(cs));
+}
+function b64urlEncode(bytes) {
+  let s = ""; for (const b of bytes) s += String.fromCharCode(b);
+  return btoa(s).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+}
+function b64urlDecode(str) {
+  if (!/^[A-Za-z0-9_-]+$/.test(str)) throw new Error("invalid chars");
+  const s = atob(str.replace(/-/g, "+").replace(/_/g, "/"));
+  const out = new Uint8Array(s.length);
+  for (let i = 0; i < s.length; i++) out[i] = s.charCodeAt(i);
+  return out;
+}
+async function encodeDrawing(strokes, thinDist = 3, quant = 2) {
+  const raw = encodeRaw(strokes, thinDist, quant);
+  const comp = await deflate(raw, "deflate");
+  return b64urlEncode(comp);
+}
+async function inflate(bytes) {
+  const ds = new DecompressionStream("deflate");
+  return streamToBytes(new Blob([bytes]).stream().pipeThrough(ds));
+}
+async function decodeDrawing(str) {
+  if (str.length > 20000) throw new Error("too long");
+  const raw = await inflate(b64urlDecode(str));
+  if (raw.length > 500000) throw new Error("too big");
+  let i = 0;
+  const readVarint = () => {
+    let v = 0, shift = 1;
+    for (let k = 0; k < 6; k++) {
+      if (i >= raw.length) throw new Error("eof");
+      const b = raw[i++]; v += (b % 128) * shift;
+      if (b < 128) return v; shift *= 128;
+    }
+    throw new Error("varint too long");
+  };
+  if (readVarint() !== 1) throw new Error("bad version");
+  const quant = readVarint();
+  if (quant < 1 || quant > 8) throw new Error("bad quant");
+  const maxQX = Math.ceil(DW / quant), maxQY = Math.ceil(DH / quant);
+  const nStrokes = readVarint();
+  if (nStrokes > 500) throw new Error("too many strokes");
+  const strokes = [];
+  let totalPts = 0;
+  for (let s = 0; s < nStrokes; s++) {
+    const c = readVarint(), w = readVarint(), n = readVarint();
+    if (c >= PALETTE.length || w >= WIDTHS.length) throw new Error("bad style");
+    if (n > 20000) throw new Error("too many points");
+    totalPts += n; if (totalPts > 60000) throw new Error("too many points total");
+    const pts = []; let px = 0, py = 0;
+    for (let k = 0; k < n; k++) {
+      px += unzig(readVarint()); py += unzig(readVarint());
+      if (px < 0 || py < 0 || px > maxQX || py > maxQY) throw new Error("coord out of range");
+      pts.push([px * quant, py * quant]);
+    }
+    strokes.push({ c, w, pts });
+  }
+  return strokes;
+}
+// ================= CODEC-END =================
+
+// ================= 描画まわり =================
+const canvas = document.getElementById("drawCanvas");
+const ctx = canvas.getContext("2d");
+const activeCanvas = document.getElementById("activeCanvas");
+const actx = activeCanvas.getContext("2d");
+let strokes = [];           // 現在の作品（確定分は base 層に描く）
+let current = null;         // 描画中ストローク（overlay 層に描く）
+let curColor = 0, curWidth = 1;
+
+function renderStroke(c, s) {
+  if (s.pts.length === 0) return;
+  c.strokeStyle = PALETTE[s.c]; c.fillStyle = PALETTE[s.c];
+  c.lineWidth = WIDTHS[s.w];
+  c.lineCap = "round"; c.lineJoin = "round";
+  if (s.pts.length === 1) { c.beginPath(); c.arc(s.pts[0][0], s.pts[0][1], WIDTHS[s.w]/2, 0, 7); c.fill(); return; }
+  c.beginPath(); c.moveTo(s.pts[0][0], s.pts[0][1]);
+  for (let i = 1; i < s.pts.length - 1; i++) {
+    const mx = (s.pts[i][0] + s.pts[i+1][0]) / 2, my = (s.pts[i][1] + s.pts[i+1][1]) / 2;
+    c.quadraticCurveTo(s.pts[i][0], s.pts[i][1], mx, my);
+  }
+  c.lineTo(s.pts[s.pts.length-1][0], s.pts[s.pts.length-1][1]);
+  c.stroke();
+}
+function renderAll(targetCtx, list) {
+  targetCtx.save();
+  targetCtx.fillStyle = "#ffffff"; targetCtx.fillRect(0, 0, DW, DH);
+  for (const s of list) renderStroke(targetCtx, s);
+  targetCtx.restore();
+}
+function renderBase() { renderAll(ctx, strokes); }
+function renderActive() {
+  actx.clearRect(0, 0, DW, DH);
+  if (current) renderStroke(actx, current);
+}
+function toLogical(e) {
+  const r = canvas.getBoundingClientRect();
+  return [ (e.clientX - r.left) * DW / r.width, (e.clientY - r.top) * DH / r.height ];
+}
+function strokeBegin(x, y) { current = { c: curColor, w: curWidth, pts: [[x, y]] }; renderActive(); }
+function strokeMove(x, y) {
+  if (!current) return;
+  const last = current.pts[current.pts.length - 1];
+  if (Math.hypot(x - last[0], y - last[1]) < 1.5) return;
+  current.pts.push([x, y]); renderActive();
+}
+function strokeEnd() {
+  if (!current) return;
+  if (current.pts.length > 0) strokes.push(current);
+  current = null; renderBase(); renderActive(); updateMeter();
+}
+activeCanvas.addEventListener("pointerdown", e => { poke(); activeCanvas.setPointerCapture(e.pointerId); const [x, y] = toLogical(e); strokeBegin(x, y); });
+activeCanvas.addEventListener("pointermove", e => {
+  if (!current) return;
+  const evs = (e.getCoalescedEvents && e.getCoalescedEvents().length) ? e.getCoalescedEvents() : [e];
+  for (const ev of evs) { const [x, y] = toLogical(ev); strokeMove(x, y); }
+});
+activeCanvas.addEventListener("pointerup", strokeEnd);
+activeCanvas.addEventListener("pointercancel", strokeEnd);
+document.addEventListener("keydown", e => {
+  if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "z") { e.preventDefault(); document.getElementById("undoBtn").click(); }
+});
+
+// パレット
+const palEl = document.getElementById("palette");
+PALETTE.forEach((col, idx) => {
+  const b = document.createElement("button");
+  b.className = "swatch" + (idx === 0 ? " sel" : ""); b.style.background = col; b.title = col;
+  b.onclick = () => { curColor = idx; palEl.querySelectorAll(".swatch").forEach(x => x.classList.remove("sel")); b.classList.add("sel"); };
+  palEl.appendChild(b);
+});
+document.querySelectorAll(".wbtn").forEach(b => b.onclick = () => {
+  curWidth = Number(b.dataset.w);
+  document.querySelectorAll(".wbtn").forEach(x => x.classList.remove("sel")); b.classList.add("sel");
+});
+document.getElementById("undoBtn").onclick = () => { strokes.pop(); renderBase(); updateMeter(); };
+document.getElementById("clearBtn").onclick = () => { strokes = []; current = null; renderBase(); renderActive(); updateMeter(); };
+
+// 容量メーター
+const meterEl = document.getElementById("meter");
+let meterTimer = null;
+function updateMeter() {
+  clearTimeout(meterTimer);
+  meterTimer = setTimeout(async () => {
+    if (strokes.length === 0) { meterEl.textContent = ""; return; }
+    try {
+      const s = await encodeDrawing(strokes);
+      const url = location.href.split("#")[0] + "#d=" + s;
+      const cls = url.length <= 700 ? "ok" : url.length <= 1200 ? "warn" : "over";
+      const label = url.length <= 1200 ? "QRで持ち帰れる見込み" : "描画量が多め（QRに入らない可能性）";
+      meterEl.innerHTML = `QR用データ: <b class="${cls}">${url.length}文字</b> ${label}`;
+    } catch { meterEl.textContent = ""; }
+  }, 250);
+}
+
+// ================= ビュー切替 =================
+const views = { draw: "viewDraw", board: "viewBoard", done: "viewDone", restore: "viewRestore" };
+function show(name) {
+  for (const k in views) document.getElementById(views[k]).classList.toggle("show", k === name);
+  document.getElementById("tabDraw").classList.toggle("active", name === "draw");
+  document.getElementById("tabBoard").classList.toggle("active", name === "board");
+  if (name === "board") renderBoard();
+}
+document.getElementById("tabDraw").onclick = () => show("draw");
+document.getElementById("tabBoard").onclick = () => show("board");
+document.getElementById("backDrawBtn").onclick = () => show("draw");
+document.getElementById("fsBtn").onclick = () => { document.documentElement.requestFullscreen && document.documentElement.requestFullscreen(); };
+
+// ================= 掲示板（localStorage） =================
+const LS_KEY = "airboard.works.v1";
+function loadWorks() { try { return JSON.parse(localStorage.getItem(LS_KEY) || "[]"); } catch { return []; } }
+function saveWorks(w) { localStorage.setItem(LS_KEY, JSON.stringify(w)); }
+
+const thumbCache = new Map();
+async function thumbPNG(dataStr) {
+  if (thumbCache.has(dataStr)) return thumbCache.get(dataStr);
+  const list = await decodeDrawing(dataStr);
+  const c = document.createElement("canvas"); c.width = DW; c.height = DH;
+  renderAll(c.getContext("2d"), list);
+  const url = c.toDataURL("image/png");
+  if (thumbCache.size > 300) thumbCache.clear();
+  thumbCache.set(dataStr, url);
+  return url;
+}
+async function renderBoard() {
+  const works = loadWorks();
+  const grid = document.getElementById("boardGrid"); grid.innerHTML = "";
+  document.getElementById("boardEmpty").style.display = works.filter(w => w.approved).length ? "none" : "block";
+  document.getElementById("boardCount").textContent = `作品 ${works.length} 件（公開 ${works.filter(w=>w.approved).length} 件）`;
+  for (const w of works) {
+    if (!w.approved && !document.body.classList.contains("admin")) continue;
+    const card = document.createElement("div"); card.className = "card";
+    const img = document.createElement("img"); img.alt = "作品";
+    thumbPNG(w.data).then(u => img.src = u).catch(() => {});
+    const del = document.createElement("button"); del.className = "del"; del.textContent = w.approved ? "非表示にする" : "承認して表示";
+    del.onclick = () => {
+      const all = loadWorks(); const t = all.find(x => x.id === w.id);
+      if (t) { t.approved = !t.approved; saveWorks(all); }
+      renderBoard();
+    };
+    const del2 = document.createElement("button"); del2.className = "del"; del2.style.background = "#555"; del2.textContent = "完全に削除";
+    del2.onclick = () => { saveWorks(loadWorks().filter(x => x.id !== w.id)); renderBoard(); };
+    card.append(img, del, del2); grid.appendChild(card);
+  }
+}
+document.getElementById("adminBtn").onclick = () => {
+  document.body.classList.toggle("admin");
+  document.getElementById("adminBtn").textContent = document.body.classList.contains("admin") ? "運営モード中（承認・削除可）" : "運営モード";
+  renderBoard();
+};
+document.getElementById("exportBtn").onclick = () => {
+  const blob = new Blob([JSON.stringify(loadWorks(), null, 2)], { type: "application/json" });
+  const a = document.createElement("a"); a.href = URL.createObjectURL(blob);
+  a.download = "airboard-backup.json"; a.click(); URL.revokeObjectURL(a.href);
+};
+
+// ================= 投稿・QR =================
+let lastWork = null;
+document.getElementById("postBtn").onclick = async (ev) => {
+  if (strokes.length === 0) { alert("まだ何も描かれていません"); return; }
+  const btn = ev.currentTarget; btn.disabled = true;
+  let data;
+  try {
+    data = await encodeDrawing(strokes);
+    const works = loadWorks();
+    const work = { id: Date.now().toString(36), ts: Date.now(), data, approved: false };
+    works.push(work); saveWorks(works); lastWork = work;
+  } catch {
+    btn.disabled = false;
+    alert("保存に失敗しました（ブラウザの保存容量がいっぱいの可能性があります）。作品は消えていないので、運営に声をかけてください。");
+    return;
+  }
+  btn.disabled = false;
+  show("done");
+  document.getElementById("fullImg").style.display = "none";
+  // QR生成（容量超過時は強めに簡略化して1回リトライ）
+  const msg = document.getElementById("qrMsg"); msg.textContent = ""; msg.className = "";
+  const qrC = document.getElementById("qrCanvas");
+  const tryQR = async (d) => {
+    const url = location.href.split("#")[0] + "#d=" + d;
+    await new Promise((res, rej) => window.QRCode.toCanvas(qrC, url, { errorCorrectionLevel: "M", width: 640, margin: 2 }, e => e ? rej(e) : res()));
+    return url;
+  };
+  if (typeof window.QRCode === "undefined") {
+    msg.textContent = "QRライブラリを読み込めませんでした（通信環境を確認）。「作品を全画面で見る」から写真で持ち帰ってください。";
+    msg.className = "err";
+    return;
+  }
+  try { await tryQR(data); }
+  catch {
+    try {
+      data = await encodeDrawing(strokes, 7, 3);
+      await tryQR(data);
+      msg.textContent = "※ QR用に線を少し簡略化しました（掲示板には元の作品が残っています）";
+    } catch {
+      msg.textContent = "描画量が多くQRに入りませんでした。「作品を全画面で見る」から写真で持ち帰ってください。";
+      msg.className = "err";
+      const g = qrC.getContext("2d"); g.clearRect(0, 0, qrC.width, qrC.height);
+    }
+  }
+  document.getElementById("fullImg").style.display = "none";
+};
+document.getElementById("fullBtn").onclick = async () => {
+  if (!lastWork) return;
+  const img = document.getElementById("fullImg");
+  img.src = await thumbPNG(lastWork.data); img.style.display = "block";
+  img.scrollIntoView({ behavior: "smooth" });
+};
+document.getElementById("nextBtn").onclick = () => {
+  strokes = []; current = null; renderBase(); renderActive(); updateMeter(); show("draw");
+};
+
+// ================= スマホ復元 =================
+async function restoreFromHash() {
+  const m = location.hash.match(/^#d=([A-Za-z0-9_-]+)$/);
+  if (!m) return false;
+  show("restore");
+  try {
+    const list = await decodeDrawing(m[1]);
+    const c = document.createElement("canvas"); c.width = DW; c.height = DH;
+    renderAll(c.getContext("2d"), list);
+    const url = c.toDataURL("image/png");
+    document.getElementById("restoreImg").src = url;
+    document.getElementById("dlLink").href = url;
+  } catch {
+    document.getElementById("restoreErr").textContent = "データを読み取れませんでした（破損している可能性があります）。";
+  }
+  return true;
+}
+
+// ================= カメラ入力への接続口 =================
+// window.AIR: カメラモジュール（module script）が使うコールバック
+window.AIR = {
+  begin(x, y) { strokeBegin(x, y); },
+  move(x, y) { strokeMove(x, y); },
+  end() { strokeEnd(); },
+  dot(x, y, on) {
+    const d = document.getElementById("penDot");
+    const r = canvas.getBoundingClientRect(), sr = document.getElementById("stage").getBoundingClientRect();
+    d.style.display = "block";
+    d.style.left = (r.left - sr.left + x * r.width / DW) + "px";
+    d.style.top = (r.top - sr.top + y * r.height / DH) + "px";
+    d.style.background = on ? "rgba(232,67,147,.5)" : "transparent";
+  },
+  dotOff() { document.getElementById("penDot").style.display = "none"; }
+};
+
+// ================= アトラクト（無操作時の誘引と自動リセット） =================
+let lastPoke = Date.now();
+function poke() {
+  lastPoke = Date.now();
+  document.getElementById("attract").classList.remove("show");
+}
+document.addEventListener("pointerdown", poke, true);
+setInterval(() => {
+  const idle = Date.now() - lastPoke;
+  const drawShown = document.getElementById("viewDraw").classList.contains("show");
+  const doneShown = document.getElementById("viewDone").classList.contains("show");
+  if (drawShown && strokes.length === 0 && !current && idle > 90000) document.getElementById("attract").classList.add("show");
+  if (doneShown && idle > 120000) document.getElementById("nextBtn").click();
+}, 5000);
+document.getElementById("attract").addEventListener("pointerdown", e => { e.stopPropagation(); poke(); });
+
+(async () => { if (!(await restoreFromHash())) { renderBase(); } })();
+</script>
+
+<script type="module">
+// ===== MediaPipe Hand Landmarker（CDN・任意機能：失敗しても本体は動く） =====
+const btn = document.getElementById("camBtn");
+const status = document.getElementById("camStatus");
+const video = document.getElementById("camPreview");
+let running = false, landmarker = null, stream = null, rafId = null;
+
+// One Euro Filter（平滑化）
+class OneEuro {
+  constructor(minCutoff = 1.2, beta = 0.02) { this.mc = minCutoff; this.beta = beta; this.xPrev = null; this.dxPrev = 0; this.tPrev = null; }
+  filter(x, t) {
+    if (this.xPrev === null) { this.xPrev = x; this.tPrev = t; return x; }
+    const dt = Math.max(1e-3, t - this.tPrev); this.tPrev = t;
+    const dx = (x - this.xPrev) / dt;
+    const aD = 1 / (1 + 1 / (2 * Math.PI * 1.0 * dt));
+    const dxHat = aD * dx + (1 - aD) * this.dxPrev; this.dxPrev = dxHat;
+    const cutoff = this.mc + this.beta * Math.abs(dxHat);
+    const a = 1 / (1 + 1 / (2 * Math.PI * cutoff * dt));
+    this.xPrev = a * x + (1 - a) * this.xPrev;
+    return this.xPrev;
+  }
+  reset() { this.xPrev = null; this.dxPrev = 0; }
+}
+const fx = new OneEuro(), fy = new OneEuro();
+const dist = (a, b) => Math.hypot(a.x - b.x, a.y - b.y);
+
+function camErrorMessage(e) {
+  switch (e && e.name) {
+    case "NotAllowedError": return "カメラの許可が得られませんでした。アドレスバー左端のアイコン（サイトの設定）からカメラを「許可」に変えて、もう一度押してください。";
+    case "NotFoundError": case "OverconstrainedError": return "使えるカメラが見つかりませんでした。USBカメラの接続を確認してください。描画はタッチ/マウスでできます。";
+    case "NotReadableError": return "カメラが他のアプリに使用中のようです。そのアプリを閉じてからもう一度押してください。";
+    case "SecurityError": return "この開き方ではカメラを使えません（HTTPSのページから開いてください）。";
+    default: return "カメラを使えませんでした。描画はタッチ/マウスでできます。";
+  }
+}
+async function startCamera() {
+  if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+    status.textContent = "この開き方ではカメラを使えません（HTTPSのページから開いてください）。描画はタッチ/マウスでできます。";
+    return;
+  }
+  // 1) 先にカメラ許可と映像取得（モデルの読み込み失敗で許可フローまで壊れないように）
+  status.textContent = "カメラの許可を確認中…（ブラウザのダイアログで「許可」を押してください）";
+  try {
+    stream = await navigator.mediaDevices.getUserMedia({ video: { width: 1280, height: 720 }, audio: false });
+  } catch (e) { status.textContent = camErrorMessage(e); return; }
+  video.srcObject = stream;
+  try { await video.play(); } catch { /* play失敗でも後段で再試行される */ }
+  video.style.display = "block";
+  running = true; btn.textContent = "📷 カメラ停止";
+  // 2) 手認識モデルの読み込み（失敗してもプレビューとタッチ描画は生きる）
+  status.textContent = "手の認識モデルを読み込み中…";
+  try {
+    const mp = await import("https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.33/+esm");
+    const vision = await mp.FilesetResolver.forVisionTasks("https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.33/wasm");
+    const opts = (delegate) => ({ baseOptions: {
+        modelAssetPath: "https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task",
+        delegate }, runningMode: "VIDEO", numHands: 1 });
+    try { landmarker = await mp.HandLandmarker.createFromOptions(vision, opts("GPU")); }
+    catch { landmarker = await mp.HandLandmarker.createFromOptions(vision, opts("CPU")); }
+    status.textContent = "カメラ動作中：つまむと描画、離すと停止";
+  } catch {
+    landmarker = null;
+    status.textContent = "カメラ映像は表示していますが、手の認識を読み込めませんでした（通信環境を確認）。描画はタッチ/マウスでできます。";
+  }
+  let lastT = -1, lastInfer = 0, pinching = false;
+  const loop = (now) => {
+    if (!running) return;
+    rafId = requestAnimationFrame(loop);
+    if (video.currentTime === lastT) return;
+    if (now - lastInfer < 33) return; // 推論は最大30fps
+    lastT = video.currentTime; lastInfer = now;
+    if (!video.videoWidth || !landmarker) return;
+    let res = null;
+    try { res = landmarker.detectForVideo(video, now); } catch { return; }
+    const lm = res && res.landmarks && res.landmarks[0];
+    if (!lm) { if (pinching) { pinching = false; window.AIR.end(); } window.AIR.dotOff(); fx.reset(); fy.reset(); return; }
+    // カメラ画像(16:9想定)を論理キャンバス(4:3)へ cover 変換し、鏡像に合わせて x 反転
+    const va = video.videoWidth / video.videoHeight, ca = 960 / 720;
+    let nx = lm[8].x, ny = lm[8].y;
+    if (va > ca) { const f = ca / va; nx = (nx - (1 - f) / 2) / f; } else { const f = va / ca; ny = (ny - (1 - f) / 2) / f; }
+    const t = now / 1000;
+    const x = Math.min(959, Math.max(0, (1 - fx.filter(nx, t)) * 960));
+    const y = Math.min(719, Math.max(0, fy.filter(ny, t) * 720));
+    const ratio = dist(lm[4], lm[8]) / Math.max(1e-6, dist(lm[0], lm[9]));
+    const on = pinching ? ratio < 0.55 : ratio < 0.38; // ヒステリシス
+    if (now - (loop._dbg || 0) > 200) { loop._dbg = now; document.getElementById("camDebug").textContent = `pinch比 ${ratio.toFixed(2)}（ON<0.38 / OFF>0.55）${on ? " 描画中" : ""}`; }
+    window.AIR.dot(x, y, on);
+    if (on && !pinching) { pinching = true; window.AIR.begin(x, y); }
+    else if (on && pinching) { window.AIR.move(x, y); }
+    else if (!on && pinching) { pinching = false; window.AIR.end(); }
+  };
+  rafId = requestAnimationFrame(loop);
+}
+function stopCamera() {
+  running = false;
+  if (rafId) cancelAnimationFrame(rafId);
+  if (stream) stream.getTracks().forEach(t => t.stop());
+  video.style.display = "none"; window.AIR.dotOff(); window.AIR.end();
+  btn.textContent = "📷 カメラで描く"; status.textContent = "";
+}
+btn.onclick = async () => {
+  if (running) { stopCamera(); return; }
+  try { await startCamera(); }
+  catch (e) { status.textContent = "カメラを使えませんでした（許可・接続・通信を確認）。マウス/タッチで描けます。"; }
+};
+</script>
+</body>
+</html>
